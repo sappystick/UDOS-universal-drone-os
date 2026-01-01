@@ -1,0 +1,754 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// CORE TENANT & MULTI-TENANCY
+// ============================================================================
+
+model Tenant {
+  id                String   @id @default(cuid())
+  name              String   @unique
+  slug              String   @unique
+  domain            String?  @unique
+  description       String?
+  logoUrl           String?
+  brandColor        String?  @default("#2180a0")
+  isActive          Boolean  @default(true)
+  isWhitelabel      Boolean  @default(false)
+  subscriptionPlan  String   @default("starter") // starter, pro, enterprise
+  maxPilots         Int      @default(10)
+  maxDrones         Int      @default(25)
+  maxOrders         Int      @default(100)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  users             User[]
+  drones            Drone[]
+  orders            Order[]
+  missions          Mission[]
+  pilots            Pilot[]
+  merchants         Merchant[]
+  payments          Payment[]
+  apiKeys           ApiKey[]
+  webhooks          Webhook[]
+  auditLogs         AuditLog[]
+  featureFlags      FeatureFlag[]
+  tenantConfig      TenantConfig?
+
+  @@index([slug])
+  @@index([isActive])
+}
+
+model TenantConfig {
+  id                    String   @id @default(cuid())
+  tenantId              String   @unique
+  customBrandingUrl     String?
+  webhookSecret         String?
+  apiRateLimit          Int      @default(1000) // per hour
+  maintenanceMode       Boolean  @default(false)
+  allowedIndustries     String[] // JSON array of industry codes
+  paymentPercentage     Int      @default(20) // Platform's cut in percentage
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// USERS & AUTHENTICATION
+// ============================================================================
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  passwordHash      String
+  firstName         String
+  lastName          String
+  phoneNumber       String?
+  profilePictureUrl String?
+  isEmailVerified   Boolean  @default(false)
+  isPhoneVerified   Boolean  @default(false)
+  isActive          Boolean  @default(true)
+  lastLoginAt       DateTime?
+  loginAttempts     Int      @default(0)
+  lockedUntil       DateTime?
+  tenantId          String
+  role              UserRole @default(USER)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pilot             Pilot?
+  merchant          Merchant?
+  sessions          Session[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  refreshTokens     RefreshToken[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([email])
+  @@index([role])
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  PILOT
+  MERCHANT
+  CUSTOMER
+  USER
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  token        String   @unique
+  expiresAt    DateTime
+  ipAddress    String?
+  userAgent    String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  isRevoked Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+// ============================================================================
+// PILOTS (Drone Operators)
+// ============================================================================
+
+model Pilot {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  tenantId            String
+  part107License      String?  @unique
+  part107Expiry       DateTime?
+  medicalCert         String?   // SAFT certificate
+  medicalExpiry       DateTime?
+  bankAccountId       String?   // Stripe Connect account
+  totalFlightHours    Float    @default(0.0)
+  totalEarnings       Float    @default(0.0)
+  rating              Float    @default(5.0)
+  completedOrders     Int      @default(0)
+  cancelledOrders     Int      @default(0)
+  verificationStatus  String   @default("pending") // pending, verified, rejected
+  backgroundCheckId   String?   // Third-party background check
+  insurancePolicy     String?   // Insurance policy number
+  isActive            Boolean  @default(true)
+  isVerified          Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  drones              Drone[]
+  orders              Order[]
+  missions            Mission[]
+  payments            Payment[]
+  reviews             Review[] @relation("PilotReviews")
+  endorsements        Endorsement[]
+  earnings            EarningRecord[]
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([part107License])
+  @@index([isVerified])
+}
+
+model Endorsement {
+  id          String   @id @default(cuid())
+  pilotId     String
+  type        String   // "BVLOS", "NIGHT", "SPECIAL_OPS", etc.
+  issuedAt    DateTime @default(now())
+  expiresAt   DateTime?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  pilot       Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+
+  @@unique([pilotId, type])
+  @@index([pilotId])
+}
+
+// ============================================================================
+// MERCHANTS (Customers/Businesses)
+// ============================================================================
+
+model Merchant {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  tenantId         String
+  businessName     String
+  businessType     String   // "restaurant", "retail", "service", etc.
+  taxId            String?  @unique
+  bankAccountId    String?  // Stripe Connect account
+  totalOrders      Int      @default(0)
+  totalSpend       Float    @default(0.0)
+  rating           Float    @default(5.0)
+  isVerified       Boolean  @default(false)
+  isActive         Boolean  @default(true)
+  apiQuota         Int      @default(1000) // API calls per day
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orders           Order[]
+  webhooks         Webhook[]
+  apiKeys          ApiKey[]
+  reviews          Review[] @relation("MerchantReviews")
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([businessType])
+}
+
+// ============================================================================
+// DRONES & HARDWARE
+// ============================================================================
+
+model Drone {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  pilotId               String
+  registrationNumber    String   @unique
+  droneModel            String   // e.g., "DJI Mavic 3", "DJI Mini 3 Pro"
+  serialNumber          String   @unique
+  purchaseDate          DateTime?
+  weight                Float    // in grams
+  maxFlightTime         Int      // in minutes
+  maxPayload            Float    // in grams
+  droneClass            String   @default("medium") // "small", "medium", "large"
+  firmwareVersion       String?
+  isActive              Boolean  @default(true)
+  totalFlightHours      Float    @default(0.0)
+  lastFlightAt          DateTime?
+  lastMaintenanceAt     DateTime?
+  nextMaintenanceDue    DateTime?
+  batteryHealth         Float    @default(100.0) // percentage
+  motorHours           Float    @default(0.0)
+  propellerCycles      Int      @default(0)
+  latitude              Float?   // Current GPS position
+  longitude             Float?
+  altitude              Float?   // Current altitude in meters
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Relations
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pilot                 Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  powerModule           PowerModule?
+  missions              Mission[]
+  telemetryData         TelemetryData[]
+  maintenanceRecords    MaintenanceRecord[]
+  attachments           DroneAttachment[]
+
+  @@unique([tenantId, serialNumber])
+  @@index([tenantId])
+  @@index([pilotId])
+  @@index([registrationNumber])
+}
+
+model PowerModule {
+  id                    String   @id @default(cuid())
+  droneId               String   @unique
+  serialNumber          String   @unique
+  hwVersion             String   @default("1.0")
+  fwVersion            String
+  batteryCapacity       Int      @default(960) // in Wh
+  batteryCount          Int      @default(2)
+  totalChargeCycles     Int      @default(0)
+  maxChargeCycles       Int      @default(1500)
+  batteryHealth         Float    @default(100.0)
+  sensorHubType         String   // "standard", "premium", "thermal"
+  hasLidar              Boolean  @default(true)
+  hasThermal            Boolean  @default(false)
+  jetsonModel           String   @default("orin-nano")
+  manufacturingDate     DateTime?
+  warrantyExpiry        DateTime?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Relations
+  drone                 Drone    @relation(fields: [droneId], references: [id], onDelete: Cascade)
+  batteries             Battery[]
+  attachments           DroneAttachment[]
+
+  @@index([droneId])
+}
+
+model Battery {
+  id                    String   @id @default(cuid())
+  powerModuleId         String
+  serialNumber          String   @unique
+  chemistryType         String   @default("LiPo") // LiPo, LiFe, NiMH
+  nominalVoltage        Float    @default(22.2) // 6S LiPo = 22.2V
+  capacityMah           Int      @default(10000)
+  chargeCycles          Int      @default(0)
+  lastChargedAt         DateTime?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+
+  powerModule           PowerModule @relation(fields: [powerModuleId], references: [id], onDelete: Cascade)
+
+  @@index([powerModuleId])
+}
+
+model DroneAttachment {
+  id                    String   @id @default(cuid())
+  droneId               String
+  powerModuleId         String
+  attachmentType        String   // "delivery_pod", "camera", "sprayer", etc.
+  attachmentModel       String
+  serialNumber          String   @unique
+  weight                Float    // in grams
+  powerConsumption      Float    // in watts
+  maxOperatingTemp      Float?
+  isActive              Boolean  @default(true)
+  attachedAt            DateTime?
+  detachedAt            DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  drone                 Drone    @relation(fields: [droneId], references: [id], onDelete: Cascade)
+  powerModule           PowerModule @relation(fields: [powerModuleId], references: [id], onDelete: Cascade)
+
+  @@unique([droneId, attachmentType])
+  @@index([droneId])
+}
+
+model MaintenanceRecord {
+  id                    String   @id @default(cuid())
+  droneId               String
+  maintenanceType       String   // "inspection", "repair", "service", "replacement"
+  description           String
+  cost                  Float?
+  performedBy           String?
+  notes                 String?
+  completedAt           DateTime
+  createdAt             DateTime @default(now())
+
+  drone                 Drone    @relation(fields: [droneId], references: [id], onDelete: Cascade)
+
+  @@index([droneId])
+}
+
+// ============================================================================
+// ORDERS & DELIVERY (Industry Module: Delivery)
+// ============================================================================
+
+model Order {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  merchantId            String
+  pilotId               String?
+  orderNumber           String   @unique
+  status                OrderStatus @default(PENDING)
+  industry              String   @default("delivery") // delivery, inspection, etc.
+  pickupLatitude        Float
+  pickupLongitude       Float
+  dropoffLatitude       Float
+  dropoffLongitude      Float
+  distance              Float?   // in kilometers
+  estimatedDuration     Int?     // in minutes
+  actualDuration        Int?
+  weight                Float?   // in grams
+  description           String?
+  specialInstructions   String?
+  price                 Float    // in USD
+  platformFee           Float?   // 20% of price
+  pilotEarning          Float?   // 50% of price
+  merchantCost          Float?   // 30% of price
+  paymentStatus         String   @default("pending") // pending, completed, refunded
+  proofOfDeliveryUrl    String?
+  proofOfDeliveryPhoto  String?
+  customerPhoneNumber   String?
+  customerEmail         String?
+  createdAt             DateTime @default(now())
+  acceptedAt            DateTime?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  updatedAt             DateTime @updatedAt
+
+  // Relations
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  merchant              Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  pilot                 Pilot?   @relation(fields: [pilotId], references: [id], onDelete: SetNull)
+  mission               Mission?
+  tracking              OrderTracking?
+  reviews               Review[]
+  payments              Payment[]
+
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId])
+  @@index([merchantId])
+  @@index([pilotId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum OrderStatus {
+  PENDING
+  ACCEPTED
+  PILOT_EN_ROUTE
+  PICKUP_ARRIVED
+  PICKED_UP
+  IN_FLIGHT
+  ARRIVING
+  DELIVERED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+model OrderTracking {
+  id                    String   @id @default(cuid())
+  orderId               String   @unique
+  currentLatitude       Float?
+  currentLongitude      Float?
+  currentAltitude       Float?   // in meters
+  currentSpeed          Float?   // in km/h
+  estimatedArrivalTime  DateTime?
+  lastUpdateAt          DateTime @default(now())
+  trackingHistory       Json     @default("[]")
+  updatedAt             DateTime @updatedAt
+
+  order                 Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+// ============================================================================
+// MISSIONS & FLIGHT CONTROL
+// ============================================================================
+
+model Mission {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  droneId               String
+  pilotId               String
+  orderId               String?  @unique
+  missionType           String   // "delivery", "inspection", "survey", etc.
+  status                MissionStatus @default(PLANNING)
+  flightPlan            Json     // Waypoint array with coordinates, altitude, speed
+  autonomyLevel         String   @default("autonomous") // manual, semi-autonomous, autonomous
+  estimatedFlightTime   Int?     // in minutes
+  actualFlightTime      Int?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  failureReason         String?
+  telemetryData         Json?    // Summary stats (avg speed, max altitude, etc.)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Relations
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  drone                 Drone    @relation(fields: [droneId], references: [id], onDelete: Cascade)
+  pilot                 Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  order                 Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  telemetryRecords      TelemetryData[]
+
+  @@unique([tenantId, orderId])
+  @@index([tenantId])
+  @@index([droneId])
+  @@index([status])
+}
+
+enum MissionStatus {
+  PLANNING
+  APPROVED
+  REJECTED
+  IN_PROGRESS
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model TelemetryData {
+  id                    String   @id @default(cuid())
+  missionId             String
+  droneId               String
+  timestamp             DateTime
+  latitude              Float
+  longitude             Float
+  altitude              Float    // in meters
+  speed                 Float    // in km/h
+  heading               Float    // in degrees (0-360)
+  battery               Float    // percentage
+  roll                  Float    // degrees
+  pitch                 Float    // degrees
+  yaw                   Float    // degrees
+  gpsAccuracy           Float?   // in meters
+  signalStrength        Int?     // -dBm (signal strength)
+  temperatureExternal   Float?
+  temperatureInternal   Float?
+  windSpeed             Float?   // in km/h
+  windDirection         Float?   // in degrees
+  attachmentStatus      Json?    // e.g., {"delivery_pod": {"locked": true, "temp": 25}}
+  createdAt             DateTime @default(now())
+
+  mission               Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  drone                 Drone    @relation(fields: [droneId], references: [id], onDelete: Cascade)
+
+  @@index([missionId])
+  @@index([droneId])
+  @@index([timestamp])
+}
+
+// ============================================================================
+// PAYMENTS & BILLING
+// ============================================================================
+
+model Payment {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  orderId               String?
+  pilotId               String?
+  merchantId            String?
+  stripePaymentIntentId String?  @unique
+  amount                Float    // in USD
+  paymentType           String   // "order_fulfillment", "payout", "subscription"
+  status                PaymentStatus @default(PENDING)
+  method                String   // "card", "bank_transfer", "wallet"
+  currency              String   @default("USD")
+  fees                  Float?   // processing fees
+  description           String?
+  createdAt             DateTime @default(now())
+  completedAt           DateTime?
+  refundedAt            DateTime?
+
+  // Relations
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order                 Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  pilot                 Pilot?   @relation(fields: [pilotId], references: [id], onDelete: SetNull)
+  merchant              Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+model EarningRecord {
+  id                    String   @id @default(cuid())
+  pilotId               String
+  amount                Float    // in USD
+  source                String   // "delivery", "inspection", "bonus", etc.
+  orderId               String?
+  paymentId             String?
+  status                String   @default("pending") // pending, completed, refunded
+  payoutDate            DateTime?
+  createdAt             DateTime @default(now())
+
+  pilot                 Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+
+  @@index([pilotId])
+  @@index([status])
+}
+
+// ============================================================================
+// REVIEWS & RATINGS
+// ============================================================================
+
+model Review {
+  id                    String   @id @default(cuid())
+  orderId               String
+  pilotId               String
+  merchantId            String
+  rating                Int      // 1-5
+  comment               String?
+  isAnonymous           Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  order                 Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  pilot                 Pilot    @relation("PilotReviews", fields: [pilotId], references: [id], onDelete: Cascade)
+  merchant              Merchant @relation("MerchantReviews", fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, pilotId])
+  @@index([pilotId])
+  @@index([merchantId])
+}
+
+// ============================================================================
+// INTEGRATIONS & WEBHOOKS
+// ============================================================================
+
+model ApiKey {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  merchantId            String?
+  name                  String
+  keyHash               String   @unique
+  keyPreview            String   // First 8 chars, last 4 chars for display
+  isActive              Boolean  @default(true)
+  rateLimit             Int      @default(1000) // per hour
+  lastUsedAt            DateTime?
+  expiresAt             DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  merchant              Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Webhook {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  merchantId            String?
+  url                   String
+  events                String[] // ["order.created", "order.completed", etc.]
+  isActive              Boolean  @default(true)
+  secret                String   // HMAC secret for signature verification
+  retryCount            Int      @default(0)
+  maxRetries            Int      @default(5)
+  lastTriedAt           DateTime?
+  lastSuccessAt         DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  merchant              Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  deliveries            WebhookDelivery[]
+
+  @@index([tenantId])
+  @@index([isActive])
+}
+
+model WebhookDelivery {
+  id                    String   @id @default(cuid())
+  webhookId             String
+  event                 String
+  payload               Json
+  responseStatus        Int?
+  responseBody          String?
+  attemptNumber         Int      @default(1)
+  nextRetryAt           DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime @default(now())
+
+  webhook               Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+  @@index([event])
+}
+
+// ============================================================================
+// FEATURE FLAGS & CONFIGURATION
+// ============================================================================
+
+model FeatureFlag {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  name                  String
+  isEnabled             Boolean  @default(false)
+  value                 String?  // For feature data
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+model Notification {
+  id                    String   @id @default(cuid())
+  userId                String
+  title                 String
+  message               String
+  notificationType      String   // "order_update", "payment", "alert", etc.
+  isRead                Boolean  @default(false)
+  actionUrl             String?  // For clickable notifications
+  createdAt             DateTime @default(now())
+  readAt                DateTime?
+
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+}
+
+// ============================================================================
+// AUDIT & COMPLIANCE
+// ============================================================================
+
+model AuditLog {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  userId                String
+  action                String   // "CREATE", "UPDATE", "DELETE", "LOGIN", etc.
+  entityType            String   // "Order", "Drone", "User", etc.
+  entityId              String
+  changes               Json?    // Before and after values
+  ipAddress             String?
+  userAgent             String?
+  createdAt             DateTime @default(now())
+
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([entityType])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// INDEXES & OPTIMIZATION
+// ============================================================================
+
+// These indexes are critical for query performance
+// - User authentication lookups: (tenantId, email)
+// - Order status queries: (tenantId, status, createdAt DESC)
+// - Drone tracking: (tenantId, pilotId, isActive)
+// - Telemetry streaming: (droneId, timestamp DESC)
+// - Payment reconciliation: (tenantId, status, createdAt)
